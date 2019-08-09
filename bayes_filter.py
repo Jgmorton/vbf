@@ -121,7 +121,7 @@ class BayesFilter():
         self.weight_b = []
 
         # Have single hidden layer and fully connected to output
-        self.weight_w.append(tf.get_variable("weight_w1", [args.code_dim, args.transform_size], 
+        self.weight_w.append(tf.get_variable("weight_w1", [args.code_dim+args.action_dim, args.transform_size], 
                                             regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight)))
         self.weight_w.append(tf.get_variable("weight_w2", [args.transform_size, args.num_matrices], 
                                             regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight)))
@@ -139,7 +139,7 @@ class BayesFilter():
         # Loop through elements of inference network and define parameters
         for i in range(len(args.inference_size)):
             if i == 0:
-                prev_size = args.feature_dim+args.code_dim
+                prev_size = args.feature_dim+args.code_dim+args.action_dim
             else:
                 prev_size = args.inference_size[i-1]
             self.inference_w.append(tf.get_variable("inference_w"+str(i), [prev_size, args.inference_size[i]], 
@@ -152,13 +152,14 @@ class BayesFilter():
         self.inference_b.append(tf.get_variable("inference_b_end", [2*args.noise_dim]))
 
     # Function to get weights for transition matrices
-    def _get_weights(self, z):
-        hidden = tf.nn.relu(tf.nn.xw_plus_b(z, self.weight_w[0], self.weight_b[0]))
+    def _get_weights(self, z, u):
+        z_u = tf.concat([z, u], axis=1)
+        hidden = tf.nn.relu(tf.nn.xw_plus_b(z_u, self.weight_w[0], self.weight_b[0]))
         return tf.nn.softmax(tf.nn.xw_plus_b(hidden, self.weight_w[1], self.weight_b[1]))
 
     # Function to generate w sample from inference network
-    def _get_inference_sample(self, args, features, z):
-        inference_input = tf.concat([features, z], axis=1)
+    def _get_inference_sample(self, args, features, z, u):
+        inference_input = tf.concat([features, z, u], axis=1)
         for i in range(len(args.inference_size)):
             inference_input = tf.nn.relu(tf.nn.xw_plus_b(inference_input, self.inference_w[i], self.inference_b[i]))
         w_dist = tf.nn.xw_plus_b(inference_input, self.inference_w[-1], self.inference_b[-1])
@@ -178,8 +179,11 @@ class BayesFilter():
 
         # Loop through time and advance observation, get distribution params
         for t in range(1, args.seq_length):
+            # Get action
+            u_t = self.u[:, t-1]
+
             # Find A, B, and C matrices
-            weights = self._get_weights(tf.squeeze(z_t, axis=1))
+            weights = self._get_weights(tf.squeeze(z_t, axis=1), u_t)
             A_t_list = []
             B_t_list = []
             C_t_list = []
@@ -192,11 +196,10 @@ class BayesFilter():
             C_t = tf.stack(C_t_list) 
 
             # Draw noise sample and append sample to list
-            w_dist, w_t = self._get_inference_sample(args, self.features[:, t], tf.squeeze(z_t, axis=1))
+            w_dist, w_t = self._get_inference_sample(args, self.features[:, t], tf.squeeze(z_t, axis=1), u_t)
             self.w_dists.append(tf.expand_dims(w_dist, axis=1))
 
             # Now advance observation forward in time
-            u_t = self.u[:, t-1]
             u_t = tf.expand_dims(u_t, axis=1)
             z_t = tf.matmul(z_t, A_t) + tf.matmul(u_t, B_t) + tf.matmul(tf.expand_dims(w_t, axis=1), C_t)
             self.z_pred.append(z_t)
@@ -204,7 +207,8 @@ class BayesFilter():
         # Remove this part to have alg from paper
         for t in range(args.seq_length, 2*args.seq_length):
             # Find A, B, and C matrices
-            weights = self._get_weights(tf.squeeze(z_t, axis=1))
+            u_t = self.u[:, t-1]
+            weights = self._get_weights(tf.squeeze(z_t, axis=1), u_t)
             A_t_list = []
             B_t_list = []
             C_t_list = []
@@ -220,7 +224,6 @@ class BayesFilter():
             w_t = tf.random_normal([args.batch_size, args.noise_dim])
 
             # Now advance observation forward in time
-            u_t = self.u[:, t-1]
             u_t = tf.expand_dims(u_t, axis=1)
             z_t = tf.matmul(z_t, A_t) + tf.matmul(u_t, B_t) + tf.matmul(tf.expand_dims(w_t, axis=1), C_t)
             self.z_pred.append(z_t)
